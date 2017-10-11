@@ -1,110 +1,118 @@
 <?php
+
 /**
  * @file
- * Contains \Drupal\Core\Database\Driver\sqlsrv\Upsert
+ * Contains \Drupal\Core\Database\Driver\sqlsrv\Upsert.
  */
+
 namespace Drupal\Driver\Database\sqlsrv;
+
 use Drupal\Core\Database\Query\Upsert as QueryUpsert;
-use Drupal\Core\Database\SchemaObjectDoesNotExistException;
-use mssql\Settings\TransactionIsolationLevel as DatabaseTransactionIsolationLevel;
-use mssql\Settings\TransactionScopeOption as DatabaseTransactionScopeOption;
+
+use Drupal\Driver\Database\sqlsrv\TransactionIsolationLevel as DatabaseTransactionIsolationLevel;
+use Drupal\Driver\Database\sqlsrv\TransactionScopeOption as DatabaseTransactionScopeOption;
 use Drupal\Driver\Database\sqlsrv\TransactionSettings as DatabaseTransactionSettings;
+
 use Drupal\Driver\Database\sqlsrv\Utils as DatabaseUtils;
+
 /**
- * Implements Native Upsert queries for MSSQL.
+ * Implements the Upsert query for the MSSQL database driver.
+ *
+ * TODO: This class has been replaced by UpsertNative. Keeping this here for a while though..
  */
 class Upsert extends QueryUpsert {
-  /**
-   * @var Connection
-   */
-  protected $connection;
-  /**
-   * Result summary of INSERTS/UPDATES after execution.
-   *
-   * @var string[]
-   */
-  public $result = NULL;
+
   /**
    * {@inheritdoc}
    */
   public function execute() {
-    // Check that the table does exist.
-    if (!$this->connection->schema()->tableExists($this->table)) {
-      throw new \Drupal\Core\Database\SchemaObjectDoesNotExistException("Table $this->table does not exist.");
+    if (!$this->preExecute()) {
+      return NULL;
     }
-    // Retrieve query options.
-    $options = $this->queryOptions;
-    // Initialize result array.
-    $this->result = [];
-    // Keep a reference to the blobs.
-    $blobs = [];
-    // Fetch the list of blobs and sequences used on that table.
-    $columnInformation = $this->connection->schema()->getTableIntrospection($this->table);
-    // Initialize placeholder count.
-    $max_placeholder = 0;
-    // Build the query, ensure that we have retries for concurrency control
-    $options['integrityretry'] = TRUE;
-    $options['prefix_tables'] = FALSE;
-    $stmt = $this->connection->prepareQuery((string) $this, $options);
-    // 3. Bind the dataset.
+
+    // Default options for upsert queries.
+    $this->queryOptions += array(
+      'throw_exception' => TRUE,
+    );
+
+    // Default fields are always placed first for consistency.
+    $insert_fields = array_merge($this->defaultFields, $this->insertFields);
+    $insert_fields_escaped = array_map(function($f) { return $this->connection->escapeField($f); }, $insert_fields);
+
+    $table = $this->connection->escapeTable($this->table);
+    $unique_key = $this->connection->escapeField($this->key);
+
+    // We have to execute multiple queries, therefore we wrap everything in a
+    // transaction so that it is atomic where possible.
+    $transaction = $this->connection->startTransaction(NULL, DatabaseTransactionSettings::GetDDLCompatibleDefaults());
+
+    // First, create a temporary table with the same schema as the table we
+    // are trying to upsert in.
+    $query = 'SELECT TOP(0) * FROM {' . $table . '}';
+    $temp_table = $this->connection->queryTemporary($query, [], array_merge($this->queryOptions, array('real_table' => TRUE)));
+
+    // Second, insert the data in the temporary table.
+    $insert = $this->connection->insert($temp_table, $this->queryOptions)
+      ->fields($insert_fields);
     foreach ($this->insertValues as $insert_values) {
-      $fields = array_combine($this->insertFields, $insert_values);
-      $stmt->BindValues($fields, $blobs, ':db_insert_placeholder_', $columnInformation, $max_placeholder);
+      $insert->values($insert_values);
     }
-    // 4. Run the query, this will return UPDATE or INSERT
-    $this->connection->query($stmt, []);
-    // Captura the results.
-    foreach ($stmt as $value) {
-      $this->result[] = $value->{'$action'};
+    $insert->execute();
+
+    // Third, lock the table we're upserting into.
+    $this->connection->query("SELECT 1 FROM {{$table}} WITH (HOLDLOCK)", [], $this->queryOptions);
+
+    // Fourth, update any rows that can be updated. This results in the
+    // following query:
+    //
+    // UPDATE table_name
+    // SET column1 = temp_table.column1 [, column2 = temp_table.column2, ...]
+    // FROM temp_table
+    // WHERE table_name.id = temp_table.id;
+    $update = [];
+    foreach ($insert_fields_escaped as $field) {
+      if ($field !== $unique_key) {
+        $update[] = "$field = {" . $temp_table . "}.$field";
+      }
     }
+
+    $update_query = 'UPDATE {' . $table . '} SET ' . implode(', ', $update);
+    $update_query .= ' FROM {' . $temp_table . '}';
+    $update_query .= ' WHERE {' . $temp_table . '}.' . $unique_key . ' = {' . $table . '}.' . $unique_key;
+    $this->connection->query($update_query, [], $this->queryOptions);
+
+    // Fifth, insert the remaining rows. This results in the following query:
+    //
+    // INSERT INTO table_name
+    // SELECT temp_table.primary_key, temp_table.column1 [, temp_table.column2 ...]
+    // FROM temp_table
+    // LEFT OUTER JOIN table_name ON (table_name.id = temp_table.id)
+    // WHERE table_name.id IS NULL;
+    $select = $this->connection->select($temp_table, 'temp_table', $this->queryOptions)
+      ->fields('temp_table', $insert_fields);
+    $select->leftJoin($this->table, 'actual_table', 'actual_table.' . $this->key . ' = temp_table.' . $this->key);
+    $select->isNull('actual_table.' . $this->key);
+
+    $this->connection->insert($this->table, $this->queryOptions)
+      ->from($select)
+      ->execute();
+
+    // Drop the "temporary" table.
+    $this->connection->query_direct("DROP TABLE {$temp_table}");
+
+    $transaction->commit();
+
     // Re-initialize the values array so that we can re-use this query.
-    $this->insertValues = [];
+    $this->insertValues = array();
+
     return TRUE;
   }
+
   /**
    * {@inheritdoc}
    */
   public function __toString() {
-    // Fetch the list of blobs and sequences used on that table.
-    $columnInformation = $this->connection->schema()->getTableIntrospection($this->table);
-    // Find out if there is an identity field set in this insert.
-    $setIdentity = !empty($columnInformation['identity']) && in_array($columnInformation['identity'], array_keys($this->insertFields));
-    $query = [];
-    $real_table = $this->connection->prefixTable($this->table);
-    // Enable direct insertion to identity columns if necessary.
-    if ($setIdentity === TRUE) {
-      $query[] = "SET IDENTITY_INSERT [$real_table] ON;";
-    }
-    $query[] = "MERGE INTO [$real_table] _target";
-    // 1. Implicit dataset
-    // select t.*  from (values(1,2,3), (2,3,4)) as t(col1,col2,col3)
-    $values = $this->getInsertPlaceholderFragment($this->insertValues, $this->defaultFields);
-    $columns = implode(', ', $this->connection->quoteIdentifiers($this->insertFields));
-    $dataset = "SELECT T.* FROM (values" . implode(',', $values) .") as T({$columns})";
-    // Build primery key conditions
-    $key_conditions = [];
-    // Fetch the list of blobs and sequences used on that table.
-    $primary_key_cols = array_column($columnInformation['indexes'][$columnInformation['primary_key_index']]['columns'], 'name');
-    foreach ($primary_key_cols as $key) {
-      $key_conditions[] = "_target.[$key] = _source.[$key]";
-    }
-    $query[] = "USING ({$dataset}) _source" . PHP_EOL . 'ON ' . implode(' AND ', $key_conditions);
-    // Mappings.
-    $insert_mappings = [];
-    $update_mappings = [];
-    foreach ($this->insertFields as $field) {
-      $insert_mappings[] = "_source.[$field]";
-      // Updating the unique / primary key is not necessary.
-      if (!in_array($field, $primary_key_cols)) {
-        $update_mappings[] = "_target.[$field] = _source.[$field]";
-      }
-    }
-    // "When matched" part
-    $query[] = 'WHEN MATCHED THEN UPDATE SET ' . implode(', ', $update_mappings);
-    // "When not matched" part.
-    $query[] = "WHEN NOT MATCHED THEN INSERT ({$columns}) VALUES (".  implode(', ', $insert_mappings) .")";
-    // Return information about the query.
-    $query[] = 'OUTPUT $action;';
-    return implode(PHP_EOL, $query);
+    // Nothing to do.
   }
+
 }

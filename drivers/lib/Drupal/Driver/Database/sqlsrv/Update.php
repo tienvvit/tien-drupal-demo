@@ -12,10 +12,10 @@ use Drupal\Core\Database\Query\Update as QueryUpdate;
 use Drupal\Core\Database\Query\Condition;
 
 use Drupal\Driver\Database\sqlsrv\Utils as DatabaseUtils;
-use Drupal\Driver\Database\sqlsrv\TransactionSettings as DatabaseTransactionSettings;
 
-use mssql\Settings\TransactionIsolationLevel as DatabaseTransactionIsolationLevel;
-use mssql\Settings\TransactionScopeOption as DatabaseTransactionScopeOption;
+use Drupal\Driver\Database\sqlsrv\TransactionIsolationLevel as DatabaseTransactionIsolationLevel;
+use Drupal\Driver\Database\sqlsrv\TransactionScopeOption as DatabaseTransactionScopeOption;
+use Drupal\Driver\Database\sqlsrv\TransactionSettings as DatabaseTransactionSettings;
 
 use PDO as PDO;
 use Exception as Exception;
@@ -23,32 +23,13 @@ use PDOStatement as PDOStatement;
 
 class Update extends QueryUpdate {
 
-  /**
-   * @var Connection
-   */
-  protected $connection;
-
-  /**
-   * {@inheritdoc}
-   */
   public function execute() {
 
     // Retrieve query options.
     $options = $this->queryOptions;
 
-    // Check that the table does exist.
-    if (!$this->connection->schema()->tableExists($this->table)) {
-      throw new \Drupal\Core\Database\SchemaObjectDoesNotExistException("Table $this->table does not exist.");
-    }
-
     // Fetch the list of blobs and sequences used on that table.
-    $columnInformation = $this->connection->schema()->getTableIntrospection($this->table);
-
-    // MySQL is a pretty slut that swallows everything thrown at it,
-    // like trying to update an identity field...
-    if (isset($columnInformation['identity']) && isset($this->fields[$columnInformation['identity']])) {
-      unset($this->fields[$columnInformation['identity']]);
-    }
+    $columnInformation = $this->connection->schema()->queryColumnInformation($this->table);
 
     // Because we filter $fields the same way here and in __toString(), the
     // placeholders will all match up properly.
@@ -57,37 +38,36 @@ class Update extends QueryUpdate {
     // Expressions take priority over literal fields, so we process those first
     // and remove any literal fields that conflict.
     $fields = $this->fields;
-    $stmt->BindExpressions($this->expressionFields, $fields);
+    DatabaseUtils::BindExpressions($stmt, $this->expressionFields, $fields);
 
     // We use this array to store references to the blob handles.
     // This is necessary because the PDO will otherwise messes up with references.
-    $blobs = [];
-    $stmt->BindValues($fields, $blobs, ':db_update_placeholder_', $columnInformation);
+    $blobs = array();
+    DatabaseUtils::BindValues($stmt, $fields, $blobs, ':db_update_placeholder_', $columnInformation);
 
     // Add conditions.
     if (count($this->condition)) {
       $this->condition->compile($this->connection, $this);
       $arguments = $this->condition->arguments();
-      $stmt->BindArguments($arguments);
+      DatabaseUtils::BindArguments($stmt, $arguments);
     }
 
     $options = $this->queryOptions;
     $options['already_prepared'] = TRUE;
 
-    $this->connection->query($stmt, [], $options);
+    $this->connection->query($stmt, array(), $options);
 
     return $stmt->rowCount();
   }
 
   public function __toString() {
-
     // Create a sanitized comment string to prepend to the query.
     $prefix = $this->connection->makeComment($this->comments);
 
     // Expressions take priority over literal fields, so we process those first
     // and remove any literal fields that conflict.
     $fields = $this->fields;
-    $update_fields = [];
+    $update_fields = array();
     foreach ($this->expressionFields as $field => $data) {
       $update_fields[] = $this->connection->quoteIdentifier($field) . '=' . $data['expression'];
       unset($fields[$field]);

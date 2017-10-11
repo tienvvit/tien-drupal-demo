@@ -2,8 +2,8 @@
 
 namespace Drupal\Driver\Database\sqlsrv;
 
-use mssql\Settings\TransactionIsolationLevel as DatabaseTransactionIsolationLevel;
-use mssql\Settings\TransactionScopeOption as DatabaseTransactionScopeOption;
+use Drupal\Driver\Database\sqlsrv\TransactionIsolationLevel as DatabaseTransactionIsolationLevel;
+use Drupal\Driver\Database\sqlsrv\TransactionScopeOption as DatabaseTransactionScopeOption;
 
 use Drupal\Core\Database\Database;
 
@@ -66,30 +66,33 @@ class TransactionSettings {
   }
 
   /**
-   * Returns a default setting system-wide to make it compatible
-   * with Drupal's defaults. Cannot use snapshot isolation because
-   * it is not compatible with DDL operations and Drupal has nod distinction.
+   * Returns a default setting system-wide.
    *
    * @return TransactionSettings
    */
   public static function GetDefaults() {
+    // Use snapshot if available.
+    $isolation = DatabaseTransactionIsolationLevel::Ignore();
+    if ($info =  Database::getConnection()->schema()->getDatabaseInfo()) {
+      if ($info->snapshot_isolation_state == TRUE) {
+        $isolation = DatabaseTransactionIsolationLevel::Snapshot();
+      }
+    }
+    // Otherwise use Drupal's default behaviour (except for nesting!)
     return new TransactionSettings(FALSE,
                 DatabaseTransactionScopeOption::Required(),
-                DatabaseTransactionIsolationLevel::ReadCommitted());
+                $isolation);
   }
 
   /**
-   * Proposed better defaults. Use Snapshot isolation when available and
-   * implicit commits.
+   * Proposed better defaults.
    *
    * @return TransactionSettings
    */
   public static function GetBetterDefaults() {
     // Use snapshot if available.
     $isolation = DatabaseTransactionIsolationLevel::Ignore();
-    /** @var Connection */
-    $connection = Database::getConnection();
-    if ($info = $connection->Scheme()->getDatabaseInfo($connection->getDatabaseName())) {
+    if ($info = Database::getConnection()->schema()->getDatabaseInfo()) {
       if ($info->snapshot_isolation_state == TRUE) {
         $isolation = DatabaseTransactionIsolationLevel::Snapshot();
       }
@@ -101,8 +104,7 @@ class TransactionSettings {
   }
 
   /**
-   * Snapshot isolation is not compatible with DDL operations, use read commited
-   * with implicit commits.
+   * Snapshot isolation is not compatible with DDL operations.
    *
    * @return TransactionSettings
    */

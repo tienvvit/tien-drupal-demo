@@ -12,7 +12,7 @@ use Drupal\Core\Database\Install\Tasks as InstallTasks;
 use Drupal\Core\Database\DatabaseNotFoundException;
 use Drupal\Driver\Database\sqlsrv\Connection;
 use Drupal\Driver\Database\sqlsrv\Schema;
-use mssql\Utils;
+use Drupal\Driver\Database\sqlsrv\Utils;
 
 /**
  * Specifies installation tasks for PostgreSQL databases.
@@ -30,15 +30,15 @@ class Tasks extends InstallTasks {
   public function __construct() {
     $this->tasks[] = array(
       'function' => 'checkEncoding',
-      'arguments' => [],
-    );
-    $this->tasks[] = array(
-      'function' => 'checkRequirements',
-      'arguments' => [],
+      'arguments' => array(),
     );
     $this->tasks[] = array(
       'function' => 'initializeDatabase',
-      'arguments' => [],
+      'arguments' => array(),
+    );
+    $this->tasks[] = array(
+      'function' => 'enableModule',
+      'arguments' => array(),
     );
   }
 
@@ -123,9 +123,9 @@ class Tasks extends InstallTasks {
    */
   protected function checkEncoding() {
     try {
-      /** @var \Drupal\Driver\Database\sqlsrv\Connection */
-      $connection = Database::getConnection();
-      $collation = $connection->Scheme()->getCollation($connection->getDatabaseName(), $connection->schema()->defaultSchema);
+      $database = Database::getConnection();
+      $schema = $database->schema();
+      $collation = $schema->getCollation();
       if ($collation == Schema::DEFAULT_COLLATION_CI || stristr($collation, '_CI') !== FALSE) {
         $this->pass(t('Database is encoded in case insensitive collation: $collation'));
       }
@@ -143,28 +143,6 @@ class Tasks extends InstallTasks {
   }
 
   /**
-   * Check for general requirements
-   */
-  protected function checkRequirements() {
-    try {
-      $errors = static::InstallRequirements();
-
-      // TODO: Find a better way to print this information...
-      if (!empty($errors)) {
-        foreach ($errors as $error) {
-          if ($error['severity'] == REQUIREMENT_ERROR || $error['severity'] == REQUIREMENT_WARNING) {
-            $this->fail($error['description']);
-          }
-        }
-      }
-
-    }
-    catch (\Exception $e) {
-      $this->fail(t('Could not check requirements:') . $e->getMessage());
-    }
-  }
-
-  /**
    * Make SQLServer Drupal friendly.
    */
   function initializeDatabase() {
@@ -174,10 +152,10 @@ class Tasks extends InstallTasks {
     // avoid trying to create them again in that case.
     try {
 
-      /** @var \Drupal\Driver\Database\sqlsrv\Connection $database */
+      /** @var Connection $database */
       $connection = Database::getConnection();
 
-      \mssql\Utils::DeployCustomFunctions($connection->getConnection(),  dirname(__FILE__) . '/../Programability');
+      Utils::DeployCustomFunctions($connection);
 
       $this->pass(t('SQLServer has initialized itself.'));
     }
@@ -190,78 +168,24 @@ class Tasks extends InstallTasks {
    * Enable the SQL Server module.
    */
   function enableModule() {
-    /** @var \Drupal\Core\Extension\ModuleInstallerInterface  */
-    $installer = \Drupal::service('module_installer');
-    $installer->install(array('sqlsrv'));
-  }
-
-  /**
-   * Return the install requirements for both the status
-   * page and the install process.
-   */
-  public static function InstallRequirements() {
-
-    // Array of requirement errors.
-    $errors = [];
-
-    #region Check for PhpMssql
-
-    include_once (__DIR__ . '/../PhpMssqlAutoloader.php');
-    if (!class_exists(\mssql\Connection::class)) {
-      $error = [];
-      $error['title'] = 'MSSQL Server PhpMssql';
-      $error['severity'] = REQUIREMENT_ERROR;
-      $error['description'] = t('This driver depends on the PhpMsql library. You can use the community *supported* <a href="https://www.drupal.org/project/sqlsrv">8.x-1.x</a> version of the driver or get PhpMSSQL from <a href="http://www.drupalonwindows.com/en/content/phpmssql">here</a>. See README.rm for deployment instructions.');
-      $errors['sqlsrv_phpmssql'] = $error;
-    }
-
-    #endregion
-
-    #region check for MS SQL PDO version and client buffer size
-
-    $sqlsrv_extension_data = Utils::ExtensionData('pdo_sqlsrv');
-
-    // Version.
-    $version_ok = version_compare($sqlsrv_extension_data->Version() , '3.2') >= 0;
-    $requirements['sqlsrv_pdo'] = array(
-      'title' => t('MSSQL Server PDO extension'),
-      'severity' => $version_ok ? REQUIREMENT_OK : REQUIREMENT_ERROR,
-      'value' => t('@level', array('@level' => $sqlsrv_extension_data->Version())),
-      'description' => t('Use at least the 3.2.0.0 version of the MSSQL PDO driver.')
-    );
-
-    // Client buffer size.
-    $buffer_size = $sqlsrv_extension_data->IniEntries()['pdo_sqlsrv.client_buffer_max_kb_size'];
-    $buffer_size_min = (12240 * 2);
-    $buffer_size_ok = $buffer_size >= $buffer_size_min;
-    $errors['sqlsrv_client_buffer_size'] = array(
-      'title' => t('MSSQL Server client buffer size'),
-      'severity' => $buffer_size_ok ? REQUIREMENT_OK : REQUIREMENT_WARNING,
-      'value' => "{$buffer_size} Kb",
-      'description' => "pdo_sqlsrv.client_buffer_max_kb_size setting must be of at least {$buffer_size_min}Kb. Currently {$buffer_size}Kb.",
-    );
-
-    return $errors;
+    // TODO: Looks like the module hanlder service is unavailable during
+    // this installation phase?
+    //$handler = new \Drupal\Core\Extension\ModuleHandler();
+    //$handler->enable(array('sqlsrv'), FALSE);
   }
 
   /**
    * {@inheritdoc}
    */
   public function getFormOptions(array $database) {
-
     $form = parent::getFormOptions($database);
     if (empty($form['advanced_options']['port']['#default_value'])) {
       $form['advanced_options']['port']['#default_value'] = '1433';
     }
-
     // Make username not required.
     $form['username']['#required'] = FALSE;
-
     // Add a description for about leaving username blank.
     $form['username']['#description'] = t('Leave username (and password) blank to use Windows authentication.');
-
-    $form['#submit'] = [];
-
     return $form;
   }
 }

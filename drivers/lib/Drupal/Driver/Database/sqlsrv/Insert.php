@@ -10,10 +10,10 @@ namespace Drupal\Driver\Database\sqlsrv;
 use Drupal\Core\Database\Database;
 use Drupal\Core\Database\Query\Insert as QueryInsert;
 
-use mssql\Utils as DatabaseUtils;
-use mssql\Settings\TransactionIsolationLevel as DatabaseTransactionIsolationLevel;
-use mssql\Settings\TransactionScopeOption as DatabaseTransactionScopeOption;
+use Drupal\Driver\Database\sqlsrv\Utils as DatabaseUtils;
 
+use Drupal\Driver\Database\sqlsrv\TransactionIsolationLevel as DatabaseTransactionIsolationLevel;
+use Drupal\Driver\Database\sqlsrv\TransactionScopeOption as DatabaseTransactionScopeOption;
 use Drupal\Driver\Database\sqlsrv\TransactionSettings as DatabaseTransactionSettings;
 
 use PDO as PDO;
@@ -28,27 +28,10 @@ use PDOStatement as PDOStatement;
 class Insert extends QueryInsert {
 
   /**
-   * @var Connection
-   */
-  protected $connection;
-
-  /**
    * Maximum number of inserts that the driver will perform
    * on a single statement.
    */
   const MAX_BATCH_SIZE = 200;
-
-  /**
-   * {@inheritdoc}
-   */
-  public function __construct($connection, $table, array $options = []) {
-    if (!isset($options['return'])) {
-      // We use internally the OUTPUT function to retrieve
-      // inserted ID's
-      $options['return'] = Database::RETURN_NULL;
-    }
-    parent::__construct($connection, $table, $options);
-  }
 
   /**
    * {@inheritdoc}
@@ -58,13 +41,8 @@ class Insert extends QueryInsert {
       return NULL;
     }
 
-    // Check that the table does exist.
-    if (!$this->connection->schema()->tableExists($this->table)) {
-      throw new \Drupal\Core\Database\SchemaObjectDoesNotExistException("Table $this->table does not exist.");
-    }
-
     // Fetch the list of blobs and sequences used on that table.
-    $columnInformation = $this->connection->schema()->getTableIntrospection($this->table);
+    $columnInformation = $this->connection->schema()->queryColumnInformation($this->table);
 
     // Find out if there is an identity field set in this insert.
     $this->setIdentity = !empty($columnInformation['identity']) && in_array($columnInformation['identity'], $this->insertFields);
@@ -77,7 +55,7 @@ class Insert extends QueryInsert {
 
     if (!empty($this->fromQuery)) {
       // Re-initialize the values array so that we can re-use this query.
-      $this->insertValues = [];
+      $this->insertValues = array();
 
       $stmt = $this->connection->prepareQuery((string) $this);
 
@@ -86,7 +64,7 @@ class Insert extends QueryInsert {
       DatabaseUtils::BindArguments($stmt, $arguments);
 
       // Run the query
-      $this->connection->query($stmt, [], $options);
+      $this->connection->query($stmt, array(), $options);
 
       // We can only have 1 identity column per table (or none, where fetchColumn will fail)
       try {
@@ -104,11 +82,11 @@ class Insert extends QueryInsert {
     // Handle the case of full-default queries.
     if (empty($this->fromQuery) && (empty($this->insertFields) || empty($this->insertValues))) {
       // Re-initialize the values array so that we can re-use this query.
-      $this->insertValues = [];
+      $this->insertValues = array();
       $stmt = $this->connection->prepareQuery((string) $this);
 
       // Run the query
-      $this->connection->query($stmt, [], $options);
+      $this->connection->query($stmt, array(), $options);
 
       // We can only have 1 identity column per table (or none, where fetchColumn will fail)
       try {
@@ -123,7 +101,7 @@ class Insert extends QueryInsert {
 
     #region Regular Inserts
 
-    $this->inserted_keys = [];
+    $this->inserted_keys = array();
 
     // Each insert happens in its own query. However, we wrap it in a transaction
     // so that it is atomic where possible.
@@ -146,16 +124,16 @@ class Insert extends QueryInsert {
 
       // We use this array to store references to the blob handles.
       // This is necessary because the PDO will otherwise messes up with references.
-      $blobs = [];
+      $blobs = array();
 
       $max_placeholder = 0;
       foreach ($batch as $insert_index => $insert_values) {
         $values = array_combine($this->insertFields, $insert_values);
-        $stmt->BindValues($values, $blobs, ':db_insert', $columnInformation, $max_placeholder, $insert_index);
+        DatabaseUtils::BindValues($stmt, $values, $blobs, ':db_insert', $columnInformation, $max_placeholder, $insert_index);
       }
 
       // Run the query
-      $this->connection->query($stmt, [], array_merge($options, array('fetch' => PDO::FETCH_ASSOC)));
+      $this->connection->query($stmt, array(), array_merge($options, array('fetch' => PDO::FETCH_ASSOC)));
 
       // We can only have 1 identity column per table (or none, where fetchColumn will fail)
       // When the column does not have an identity column, no results are thrown back.
@@ -178,7 +156,7 @@ class Insert extends QueryInsert {
     }
 
     // Re-initialize the values array so that we can re-use this query.
-    $this->insertValues = [];
+    $this->insertValues = array();
 
     // Return the last inserted key.
     return empty($this->inserted_keys) ? NULL : end($this->inserted_keys);
@@ -188,7 +166,7 @@ class Insert extends QueryInsert {
 
   // Because we can handle multiple inserts, give
   // an option to retrieve all keys.
-  private $inserted_keys = [];
+  private $inserted_keys = array();
 
   /**
    * Retrieve an array of the keys resulting from
@@ -223,7 +201,7 @@ class Insert extends QueryInsert {
     }
 
     // Fetch the list of blobs and sequences used on that table.
-    $columnInformation = $this->connection->schema()->getTableIntrospection($this->table);
+    $columnInformation = $this->connection->schema()->queryColumnInformation($this->table);
 
     // Create a sanitized comment string to prepend to the query.
     $prefix = $this->connection->makeComment($this->comments);
@@ -265,10 +243,10 @@ class Insert extends QueryInsert {
 
     // Build the list of placeholders, a set of placeholders
     // for each element in the batch.
-    $placeholders = [];
+    $placeholders = array();
     $field_count = count($this->insertFields);
     for($j = 0; $j < $batch_size; $j++) {
-      $batch_placeholders = [];
+      $batch_placeholders = array();
       for ($i = 0; $i < $field_count; ++$i) {
         $batch_placeholders[] = ':db_insert' . (($field_count * $j) + $i);
       }
